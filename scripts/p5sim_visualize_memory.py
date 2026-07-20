@@ -44,6 +44,10 @@ parser.add_argument("--gt", default=None)
 parser.add_argument("--stations", default=None)
 parser.add_argument("--yup", action="store_true",
                     help="场景源数据是 Y-up (如 4dkankan/realsee 的 OBJ)")
+parser.add_argument("--auto", type=float, default=0.0,
+                    help="replay 自动播放, 每事件停留秒数; 0=回车步进(默认)")
+parser.add_argument("--shots", default=None,
+                    help="replay 每事件截图输出目录 (可选, 用于录demo/做GIF)")
 parser.add_argument("--headless", action="store_true")
 args = parser.parse_args()
 
@@ -76,48 +80,95 @@ def load_memory(db_path):
 
 
 def load_gt_sizes(gt_path):
-    """gt_instances.json -> [(class_label, x, y, z, sx, sy, sz), ...]; 无文件返回空列表。
+    """gt_instances.json -> {uuid: (sx, sy, sz)}; 无文件返回空表。
 
-    gt_instances.json 顶层是 {"instances": [...], "places": {...}, ...} 一个
-    dict,不是裸 list -- 之前直接 `for item in json.loads(...)` 会把 dict 的
-    key(字符串)当条目遍历,`item.get(...)` 直接崩(实测踩到)。
-
-    真值条目里没有 uuid(uuid 是入库时才生成的,gt_instances.json 和任何
-    memory DB 之间没有天然的 join key),所以按 (class_label, 最近位置) 匹配,
-    思路和 consolidator 自己的匹配门控类似,但只用来决定可视化盒子尺寸。
-    对 sim_memory.db(1a,真实 scene_04 103 个实例)有意义;对
-    sim_memory_1b.db(T1-T11 合成测试对象,坐标故意放在场景外很远的地方)
-    不会匹配到任何东西,盒子会全部退化成默认 0.35m 立方体 -- 这是正确行为,
-    不是 bug,1b 的库本来就不该期待和这份真值对得上。
+    兼容顶层三种形态:
+      1. [ {...}, {...} ]                      # 列表
+      2. {"instances": [...]} 等包裹键          # 包裹列表
+      3. { "<uuid>": {...}, ... }              # uuid 做键的字典
+    兼容 AABB 两种形态:
+      a. {"min_x":..,"max_x":..,...}
+      b. {"min":[x,y,z], "max":[x,y,z]}  或 6 元素平铺列表
     """
     if not gt_path:
-        return []
+        return {"by_uuid": {}, "entries": []}
     data = json.loads(Path(gt_path).read_text())
-    items = data.get("instances", []) if isinstance(data, dict) else data
-    out = []
-    for item in items:
-        bb = item.get("aabb") or item.get("bounds")
-        pose = item.get("pose") or {}
-        label = item.get("class_label")
-        if bb and label and "x" in pose:
-            out.append((label, pose["x"], pose["y"], pose.get("z", 0.0),
-                        max(0.1, bb["max_x"] - bb["min_x"]),
-                        max(0.1, bb["max_y"] - bb["min_y"]),
-                        max(0.1, bb["max_z"] - bb["min_z"])))
-    return out
 
+    if isinstance(data, dict):
+        candidates = []
+        for k, v in data.items():
+            if isinstance(v, list) and v and isinstance(v[0], dict):
+                candidates.append((k, v))
+            elif isinstance(v, dict) and v and all(
+                    isinstance(x, dict) for x in list(v.values())[:3]):
+                candidates.append((k, [dict(x, uuid=x.get("uuid", kk))
+                                       for kk, x in v.items()]))
+        if candidates:
+            # 键名含 instance/object 的优先 (避免误选 places 等旁支键);
+            # 同优先级取条目最多的
+            def _rank(c):
+                name = c[0].lower()
+                named = ("instance" in name) or ("object" in name)
+                return (0 if named else 1, -len(c[1]))
+            candidates.sort(key=_rank)
+            if len(candidates) > 1:
+                print(f"[gt] 候选键 {[k for k, _ in candidates]}, "
+                      f"选用 '{candidates[0][0]}' ({len(candidates[0][1])} 条)")
+            data = candidates[0][1]
+        else:  # 顶层本身就是 uuid 做键的字典
+            data = [dict(v, uuid=v.get("uuid", k))
+                    for k, v in data.items() if isinstance(v, dict)]
 
-GT_MATCH_MAX_DIST = 0.5  # 米,只影响可视化盒子尺寸,不是匹配算法本身
-
-
-def _lookup_gt_size(gt_list, label, x, y, z):
-    best, best_d = None, GT_MATCH_MAX_DIST
-    for g_label, gx, gy, gz, sx, sy, sz in gt_list:
-        if g_label != label:
+    by_uuid, entries = {}, []
+    for item in data:
+        if not isinstance(item, dict):
             continue
-        d = math.dist((x, y, z), (gx, gy, gz))
-        if d < best_d:
-            best, best_d = (sx, sy, sz), d
+        uid = item.get("uuid") or item.get("id")
+        bb = (item.get("aabb") or item.get("bounds")
+              or item.get("bbox") or item.get("aabb_world"))
+        if bb is None:
+            continue
+        try:
+            if isinstance(bb, dict) and "min_x" in bb:
+                lo = (bb["min_x"], bb["min_y"], bb["min_z"])
+                hi = (bb["max_x"], bb["max_y"], bb["max_z"])
+            elif isinstance(bb, dict) and "min" in bb:
+                lo, hi = tuple(bb["min"][:3]), tuple(bb["max"][:3])
+            elif isinstance(bb, (list, tuple)) and len(bb) == 6:
+                lo, hi = tuple(bb[:3]), tuple(bb[3:])
+            else:
+                continue
+            ext = tuple(max(0.1, abs(hi[i] - lo[i])) for i in range(3))
+            ctr = tuple((hi[i] + lo[i]) / 2.0 for i in range(3))
+            entries.append((ctr, ext))
+            if uid:
+                by_uuid[uid] = ext
+        except (KeyError, IndexError, TypeError):
+            continue
+
+    if not entries:
+        sample = data[0] if isinstance(data, list) and data else data
+        print(f"[warn] gt 未解析出任何 AABB, 盒子将用默认尺寸 0.35m。"
+              f"首条目结构样例: {str(sample)[:300]}")
+    else:
+        print(f"[gt] 尺寸解析成功 {len(entries)} 条 "
+              f"(uuid 可索引 {len(by_uuid)} 条)")
+    return {"by_uuid": by_uuid, "entries": entries}
+
+
+def _size_for(gt_index, o, max_dist=0.75):
+    """uuid 直查; 失配时按 AABB 中心最近邻匹配。
+    consolidator ADD 时会生成新 uuid, 与真值提取侧 uuid 不同源,
+    所以位置最近邻才是常态匹配路径, uuid 直查只是巧合命中时的捷径。"""
+    ext = gt_index["by_uuid"].get(o["uuid"])
+    if ext:
+        return ext
+    best, best_d2 = None, max_dist * max_dist
+    for ctr, e in gt_index["entries"]:
+        d2 = ((ctr[0] - o["x"]) ** 2 + (ctr[1] - o["y"]) ** 2
+              + (ctr[2] - o["z"]) ** 2)
+        if d2 < best_d2:
+            best, best_d2 = e, d2
     return best or (0.35, 0.35, 0.35)
 
 
@@ -126,7 +177,10 @@ def _lookup_gt_size(gt_list, label, x, y, z):
 # ----------------------------------------------------------------------------
 
 def load_scene(stage, scene_path, yup):
-    scene_path = str(scene_path)
+    # reference 相对匿名 stage 解析而非工作目录, 必须转绝对路径
+    scene_path = str(Path(scene_path).resolve())
+    if not Path(scene_path).exists():
+        raise FileNotFoundError(f"场景文件不存在: {scene_path}")
     root = UsdGeom.Xform.Define(stage, "/World/Scene")
     if yup:
         # Rx(+90°) == 修复后的 yup_to_zup: (x,y,z)->(x,-z,y)
@@ -215,6 +269,19 @@ def sanitize(name):
     return "".join(ch if ch.isalnum() else "_" for ch in name)[:48]
 
 
+def _try_frame(prim_path="/World/Memory"):
+    """选中 prim 并让视口相机自动 framing (等效手动选中后按 F)。
+    [API-CHECK] 若本机 API 不符只打警告不中断。"""
+    try:
+        import omni.kit.viewport.utility as vu
+        ctx = omni.usd.get_context()
+        ctx.get_selection().set_selected_prim_paths([prim_path], True)
+        vu.frame_viewport_selection(vu.get_active_viewport())
+        app.update()
+    except Exception as e:
+        print(f"[warn] 自动对准视角失败(可手动: Stage选中后按F): {e}")
+
+
 def draw_entities(stage, objs, gt_sizes, missed_uuids=frozenset()):
     root = UsdGeom.Xform.Define(stage, "/World/Memory")
     for o in objs:
@@ -225,7 +292,7 @@ def draw_entities(stage, objs, gt_sizes, missed_uuids=frozenset()):
         xf.AddRotateZOp().Set(math.degrees(o["yaw"] or 0.0))
 
         cube = UsdGeom.Cube.Define(stage, prim_path + "/box")
-        sx, sy, sz = _lookup_gt_size(gt_sizes, o["class_label"], o["x"], o["y"], o["z"])
+        sx, sy, sz = _size_for(gt_sizes, o)
         cube.AddScaleOp().Set(Gf.Vec3f(sx / 2, sy / 2, sz / 2))  # Cube 边长 2
         color = (Gf.Vec3f(0.95, 0.15, 0.15)      # 真值漏检: 红
                  if o["uuid"] in missed_uuids else status_color(o))
@@ -287,8 +354,27 @@ def build_timeline(objs, events):
 
 
 def run_replay(stage, objs, events, gt_sizes):
+    import time
     frames = build_timeline(objs, events)
-    print(f"[replay] 共 {len(frames)} 个事件帧; 控制台回车步进, q 退出")
+    shots_dir = Path(args.shots) if args.shots else None
+    if shots_dir:
+        shots_dir.mkdir(parents=True, exist_ok=True)
+    mode_desc = (f"自动播放, 每事件 {args.auto}s" if args.auto > 0
+                 else "控制台回车步进, q 退出")
+    print(f"[replay] 共 {len(frames)} 个事件帧; {mode_desc}")
+    # 先用"终局全体实体分布"画一遍并 framing, 让机位一开始就覆盖全场,
+    # 避免对着 seq=1 的单个小盒怼特写、后续实体全部出画
+    if frames:
+        _, _, _, last_snap = frames[-1]
+        draw_entities(stage, list(last_snap.values()), gt_sizes)
+        for _ in range(3):
+            app.update()
+        _try_frame("/World/Memory")
+        print("      [提示] 机位已按全体实体范围预置, 现在可手动微调, "
+              "调好后回车开始播放" if args.auto == 0 else
+              "      [提示] 机位已按全体实体范围预置")
+        if args.auto == 0:
+            input("      按回车开始 > ")
     for seq, et, uid, snap in frames:
         # 清掉旧盒重画 (帧数不大, 简单粗暴即可)
         old = stage.GetPrimAtPath("/World/Memory")
@@ -299,9 +385,25 @@ def run_replay(stage, objs, events, gt_sizes):
               f"库内active={sum(1 for s in snap.values() if s['status']=='active')}")
         for _ in range(3):
             app.update()
-        cmd = input("      [Enter]下一事件 / q 退出 > ").strip().lower()
-        if cmd == "q":
-            break
+        if shots_dir:
+            # [API-CHECK] 截图工具在 4.5 的标准位置; 若 import 失败按本机扩展名调整
+            try:
+                from omni.kit.viewport.utility import (
+                    get_active_viewport, capture_viewport_to_file)
+                capture_viewport_to_file(
+                    get_active_viewport(),
+                    str(shots_dir / f"seq_{seq:04d}_{et}.png"))
+                app.update()
+            except Exception as e:
+                print(f"      [warn] 截图失败: {e}")
+        if args.auto > 0:
+            t0 = time.time()
+            while time.time() - t0 < args.auto:
+                app.update()
+        else:
+            cmd = input("      [Enter]下一事件 / q 退出 > ").strip().lower()
+            if cmd == "q":
+                break
 
 
 # ----------------------------------------------------------------------------
@@ -352,12 +454,13 @@ def main():
     objs, events = load_memory(args.db)
     gt_sizes = load_gt_sizes(args.gt)
     print(f"[load] 实体 {len(objs)} 条 / 事件 {len(events)} 条 "
-          f"/ 带尺寸真值 {len(gt_sizes)} 条")
+          f"/ 带尺寸真值 {len(gt_sizes['entries'])} 条")
 
     load_scene(stage, args.scene, args.yup)
 
     if args.mode == "snapshot":
         draw_entities(stage, objs, gt_sizes)
+        _try_frame("/World/Memory")
         # 可选: 把 GT 里库中完全不存在的条目画成红色小盒 (系统性漏检可视化),
         # 需要 gt 与 db 的 uuid 体系一致; 4dkankan 的 29 条独立标注真值
         # 若 uuid 不同源, 改成按 (label, 距离<0.5m) 匹配后取补集即可
@@ -368,6 +471,7 @@ def main():
             sys.exit("occlusion 模式需要 --stations stations.json")
         draw_entities(stage, objs, gt_sizes)
         run_occlusion(stage, objs, args.stations)
+        _try_frame("/World/Stations")
 
     if not args.headless:
         print("[view] 进入交互查看; 关窗口退出")
