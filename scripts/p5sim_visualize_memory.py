@@ -282,6 +282,23 @@ def _try_frame(prim_path="/World/Memory"):
         print(f"[warn] 自动对准视角失败(可手动: Stage选中后按F): {e}")
 
 
+def _capture(path):
+    """存一张当前视口截图。snapshot/occlusion 模式在 --headless 下如果不
+    调用这个, 什么文件都不会落盘 -- 之前只有 replay 模式接了 --shots,
+    snapshot/occlusion 在无人值守/纯远程验证时完全没法留证据, 补齐。
+    [API-CHECK] 截图 API 位置同 run_replay 里那处。"""
+    try:
+        from omni.kit.viewport.utility import (
+            get_active_viewport, capture_viewport_to_file)
+        for _ in range(3):
+            app.update()
+        capture_viewport_to_file(get_active_viewport(), str(path))
+        app.update()
+        print(f"[shot] 已存 {path}")
+    except Exception as e:
+        print(f"[warn] 截图失败: {e}")
+
+
 def draw_entities(stage, objs, gt_sizes, missed_uuids=frozenset()):
     root = UsdGeom.Xform.Define(stage, "/World/Memory")
     for o in objs:
@@ -386,16 +403,7 @@ def run_replay(stage, objs, events, gt_sizes):
         for _ in range(3):
             app.update()
         if shots_dir:
-            # [API-CHECK] 截图工具在 4.5 的标准位置; 若 import 失败按本机扩展名调整
-            try:
-                from omni.kit.viewport.utility import (
-                    get_active_viewport, capture_viewport_to_file)
-                capture_viewport_to_file(
-                    get_active_viewport(),
-                    str(shots_dir / f"seq_{seq:04d}_{et}.png"))
-                app.update()
-            except Exception as e:
-                print(f"      [warn] 截图失败: {e}")
+            _capture(shots_dir / f"seq_{seq:04d}_{et}.png")
         if args.auto > 0:
             t0 = time.time()
             while time.time() - t0 < args.auto:
@@ -461,6 +469,9 @@ def main():
     if args.mode == "snapshot":
         draw_entities(stage, objs, gt_sizes)
         _try_frame("/World/Memory")
+        if args.shots:
+            Path(args.shots).mkdir(parents=True, exist_ok=True)
+            _capture(Path(args.shots) / "snapshot.png")
         # 可选: 把 GT 里库中完全不存在的条目画成红色小盒 (系统性漏检可视化),
         # 需要 gt 与 db 的 uuid 体系一致; 4dkankan 的 29 条独立标注真值
         # 若 uuid 不同源, 改成按 (label, 距离<0.5m) 匹配后取补集即可
@@ -472,6 +483,9 @@ def main():
         draw_entities(stage, objs, gt_sizes)
         run_occlusion(stage, objs, args.stations)
         _try_frame("/World/Stations")
+        if args.shots:
+            Path(args.shots).mkdir(parents=True, exist_ok=True)
+            _capture(Path(args.shots) / "occlusion.png")
 
     if not args.headless:
         print("[view] 进入交互查看; 关窗口退出")
