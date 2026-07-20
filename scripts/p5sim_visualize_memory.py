@@ -76,18 +76,49 @@ def load_memory(db_path):
 
 
 def load_gt_sizes(gt_path):
-    """gt_instances.json -> {uuid: (sx, sy, sz)}; 无文件返回空表。"""
+    """gt_instances.json -> [(class_label, x, y, z, sx, sy, sz), ...]; 无文件返回空列表。
+
+    gt_instances.json 顶层是 {"instances": [...], "places": {...}, ...} 一个
+    dict,不是裸 list -- 之前直接 `for item in json.loads(...)` 会把 dict 的
+    key(字符串)当条目遍历,`item.get(...)` 直接崩(实测踩到)。
+
+    真值条目里没有 uuid(uuid 是入库时才生成的,gt_instances.json 和任何
+    memory DB 之间没有天然的 join key),所以按 (class_label, 最近位置) 匹配,
+    思路和 consolidator 自己的匹配门控类似,但只用来决定可视化盒子尺寸。
+    对 sim_memory.db(1a,真实 scene_04 103 个实例)有意义;对
+    sim_memory_1b.db(T1-T11 合成测试对象,坐标故意放在场景外很远的地方)
+    不会匹配到任何东西,盒子会全部退化成默认 0.35m 立方体 -- 这是正确行为,
+    不是 bug,1b 的库本来就不该期待和这份真值对得上。
+    """
     if not gt_path:
-        return {}
-    sizes = {}
-    for item in json.loads(Path(gt_path).read_text()):
+        return []
+    data = json.loads(Path(gt_path).read_text())
+    items = data.get("instances", []) if isinstance(data, dict) else data
+    out = []
+    for item in items:
         bb = item.get("aabb") or item.get("bounds")
-        uid = item.get("uuid") or item.get("id")
-        if bb and uid:
-            sizes[uid] = (max(0.1, bb["max_x"] - bb["min_x"]),
-                          max(0.1, bb["max_y"] - bb["min_y"]),
-                          max(0.1, bb["max_z"] - bb["min_z"]))
-    return sizes
+        pose = item.get("pose") or {}
+        label = item.get("class_label")
+        if bb and label and "x" in pose:
+            out.append((label, pose["x"], pose["y"], pose.get("z", 0.0),
+                        max(0.1, bb["max_x"] - bb["min_x"]),
+                        max(0.1, bb["max_y"] - bb["min_y"]),
+                        max(0.1, bb["max_z"] - bb["min_z"])))
+    return out
+
+
+GT_MATCH_MAX_DIST = 0.5  # 米,只影响可视化盒子尺寸,不是匹配算法本身
+
+
+def _lookup_gt_size(gt_list, label, x, y, z):
+    best, best_d = None, GT_MATCH_MAX_DIST
+    for g_label, gx, gy, gz, sx, sy, sz in gt_list:
+        if g_label != label:
+            continue
+        d = math.dist((x, y, z), (gx, gy, gz))
+        if d < best_d:
+            best, best_d = (sx, sy, sz), d
+    return best or (0.35, 0.35, 0.35)
 
 
 # ----------------------------------------------------------------------------
@@ -194,7 +225,7 @@ def draw_entities(stage, objs, gt_sizes, missed_uuids=frozenset()):
         xf.AddRotateZOp().Set(math.degrees(o["yaw"] or 0.0))
 
         cube = UsdGeom.Cube.Define(stage, prim_path + "/box")
-        sx, sy, sz = gt_sizes.get(o["uuid"], (0.35, 0.35, 0.35))
+        sx, sy, sz = _lookup_gt_size(gt_sizes, o["class_label"], o["x"], o["y"], o["z"])
         cube.AddScaleOp().Set(Gf.Vec3f(sx / 2, sy / 2, sz / 2))  # Cube 边长 2
         color = (Gf.Vec3f(0.95, 0.15, 0.15)      # 真值漏检: 红
                  if o["uuid"] in missed_uuids else status_color(o))
