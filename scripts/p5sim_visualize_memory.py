@@ -41,6 +41,11 @@ parser.add_argument("--db", required=True)
 parser.add_argument("--mode", default="snapshot",
                     choices=["snapshot", "replay", "occlusion"])
 parser.add_argument("--gt", default=None)
+parser.add_argument("--place", default=None,
+                    help="只画/只对焦某个 place_id 的实体 (snapshot 模式很有用:"
+                         "不加这个选项相机会按全部 place 的整体范围取景, 如果各"
+                         "place 尺度悬殊 -- 比如一个小房间 vs 一整个庭院 -- 镜头"
+                         "会被大的那个拉得很远, 小 place 里的细节完全看不清)")
 parser.add_argument("--stations", default=None)
 parser.add_argument("--yup", action="store_true",
                     help="场景源数据是 Y-up (如 4dkankan/realsee 的 OBJ)")
@@ -463,6 +468,12 @@ def main():
     gt_sizes = load_gt_sizes(args.gt)
     print(f"[load] 实体 {len(objs)} 条 / 事件 {len(events)} 条 "
           f"/ 带尺寸真值 {len(gt_sizes['entries'])} 条")
+
+    if args.place:
+        before = len(objs)
+        objs = [o for o in objs if o["place_id"] == args.place]
+        events = [e for e in events if e["entity_uuid"] in {o["uuid"] for o in objs}]
+        print(f"[place] 过滤到 place_id={args.place}: {before} -> {len(objs)} 条实体")
 
     load_scene(stage, args.scene, args.yup)
 
