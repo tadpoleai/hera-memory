@@ -1,0 +1,7 @@
+secrets/
+work/
+*.pyc
+__pycache__/
+.venv_p5sim/
+.venv_p5sim_o3d/
+data/raw
