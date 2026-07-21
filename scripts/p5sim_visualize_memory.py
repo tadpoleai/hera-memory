@@ -46,6 +46,13 @@ parser.add_argument("--place", default=None,
                          "不加这个选项相机会按全部 place 的整体范围取景, 如果各"
                          "place 尺度悬殊 -- 比如一个小房间 vs 一整个庭院 -- 镜头"
                          "会被大的那个拉得很远, 小 place 里的细节完全看不清)")
+parser.add_argument("--exclude-labels", default=None,
+                    help="逗号分隔的 class_label 列表, 从渲染/取景里排除"
+                         "(snapshot 模式很有用: wall/floor/window 这类占满"
+                         "整个房间的结构件会把 framing 撑得很开, 家具类小"
+                         "物体挤成几个像素, 排除掉结构件才能看清框有没有"
+                         "真的贴在家具上, 例如 --exclude-labels wall,floor,"
+                         "window,floor_tile)")
 parser.add_argument("--stations", default=None)
 parser.add_argument("--yup", action="store_true",
                     help="场景源数据是 Y-up (如 4dkankan/realsee 的 OBJ)")
@@ -483,6 +490,13 @@ def main():
         objs = [o for o in objs if o["place_id"] == args.place]
         events = [e for e in events if e["entity_uuid"] in {o["uuid"] for o in objs}]
         print(f"[place] 过滤到 place_id={args.place}: {before} -> {len(objs)} 条实体")
+
+    if args.exclude_labels:
+        excl = {s.strip() for s in args.exclude_labels.split(",") if s.strip()}
+        before = len(objs)
+        objs = [o for o in objs if o["class_label"] not in excl]
+        events = [e for e in events if e["entity_uuid"] in {o["uuid"] for o in objs}]
+        print(f"[exclude] 排除 {excl}: {before} -> {len(objs)} 条实体")
 
     load_scene(stage, args.scene, args.yup)
 
