@@ -136,6 +136,7 @@ def load_gt_sizes(gt_path):
         if not isinstance(item, dict):
             continue
         uid = item.get("uuid") or item.get("id")
+        label = item.get("class_label") or item.get("label")
         bb = (item.get("aabb") or item.get("bounds")
               or item.get("bbox") or item.get("aabb_world"))
         if bb is None:
@@ -152,7 +153,12 @@ def load_gt_sizes(gt_path):
                 continue
             ext = tuple(max(0.1, abs(hi[i] - lo[i])) for i in range(3))
             ctr = tuple((hi[i] + lo[i]) / 2.0 for i in range(3))
-            entries.append((ctr, ext))
+            # label 一起存: 最近邻匹配必须同标签才可信, 见 _size_for 的说明
+            # (实测踩过坑: 不按标签过滤时, wall/floor 这类横跨整个房间的
+            # 巨大 AABB 会把"离它质心最近"的任何家具类实体的尺寸污染成
+            # 房间大小的板子, --exclude-labels 只影响画不画, 不影响这个
+            # 匹配池, 两者要分开处理)
+            entries.append((label, ctr, ext))
             if uid:
                 by_uuid[uid] = ext
         except (KeyError, IndexError, TypeError):
@@ -169,14 +175,24 @@ def load_gt_sizes(gt_path):
 
 
 def _size_for(gt_index, o, max_dist=0.75):
-    """uuid 直查; 失配时按 AABB 中心最近邻匹配。
+    """uuid 直查; 失配时按 (同 class_label, AABB 中心最近邻) 匹配。
     consolidator ADD 时会生成新 uuid, 与真值提取侧 uuid 不同源,
-    所以位置最近邻才是常态匹配路径, uuid 直查只是巧合命中时的捷径。"""
+    所以位置最近邻才是常态匹配路径, uuid 直查只是巧合命中时的捷径。
+
+    必须同 label 才能匹配, 不能只按距离 -- 实测踩过坑: wall/floor 这类
+    横跨整个房间的巨大 AABB, 只要质心离某个家具类实体足够近(哪怕差着好几米
+    的量级, 房间尺度下"最近"很容易就是它们), 不按 label 过滤就会把家具的
+    盒子尺寸污染成房间大小的板子 -- 而且这个污染源和 --exclude-labels 是否
+    把 wall/floor 排除在画面外无关, 因为那只影响画不画, 这个匹配池不受影响。
+    """
     ext = gt_index["by_uuid"].get(o["uuid"])
     if ext:
         return ext
+    label = o["class_label"]
     best, best_d2 = None, max_dist * max_dist
-    for ctr, e in gt_index["entries"]:
+    for g_label, ctr, e in gt_index["entries"]:
+        if g_label != label:
+            continue
         d2 = ((ctr[0] - o["x"]) ** 2 + (ctr[1] - o["y"]) ** 2
               + (ctr[2] - o["z"]) ** 2)
         if d2 < best_d2:
