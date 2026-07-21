@@ -325,19 +325,30 @@ def _try_frame(prim_path="/World/Memory"):
         print(f"[warn] 自动对准视角失败(可手动: Stage选中后按F): {e}")
 
 
-def _capture(path):
+def _capture(path, settle_frames=120):
     """存一张当前视口截图。snapshot/occlusion 模式在 --headless 下如果不
     调用这个, 什么文件都不会落盘 -- 之前只有 replay 模式接了 --shots,
     snapshot/occlusion 在无人值守/纯远程验证时完全没法留证据, 补齐。
+
+    settle_frames 默认从 3 提到 120: 实测 KitchenRoom 的 DomeLight 贴图
+    (chive 7000x3500.hdr, 71MB, 路径本身没问题) 截图里始终是 Isaac Sim
+    默认兜底天空盒, 不是资源缺失——大概率是 RTX 路径追踪的累积去噪还没收敛
+    / 大贴图流式加载还没跑完, 3 帧远远不够。这里用时间兜底(至少跑够
+    settle_frames 帧或 4 秒, 两者取较大值), 而不是死等某个"加载完成"信号
+    (RTX 累积收敛没有像 is_stage_loading() 那样干净的完成回调)。
     [API-CHECK] 截图 API 位置同 run_replay 里那处。"""
     try:
         from omni.kit.viewport.utility import (
             get_active_viewport, capture_viewport_to_file)
-        for _ in range(3):
+        import time
+        t0 = time.time()
+        i = 0
+        while i < settle_frames or time.time() - t0 < 4.0:
             app.update()
+            i += 1
         capture_viewport_to_file(get_active_viewport(), str(path))
         app.update()
-        print(f"[shot] 已存 {path}")
+        print(f"[shot] 已存 {path} ({i} 帧 settle)")
     except Exception as e:
         print(f"[warn] 截图失败: {e}")
 
