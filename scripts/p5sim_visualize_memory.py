@@ -407,6 +407,15 @@ def run_replay(stage, objs, events, gt_sizes):
               f"库内active={sum(1 for s in snap.values() if s['status']=='active')}")
         for _ in range(3):
             app.update()
+        # 每帧对焦到本次事件实际变化的那个实体, 不是全程焦在整体范围不动。
+        # 之前全程用一次性的整体 framing 拍 25 张回放截图, 实测发现构图
+        # 几乎一模一样看不出区别 -- T1-T11 的合成对象排成一条约200m长的线,
+        # 又都是默认0.35m小方块, 固定远景下每帧只占几个像素, 技术上对但
+        # 视觉上没有诊断价值。改成逐帧对焦到 uid 对应的 prim。
+        target = snap.get(uid)
+        if target is not None:
+            label = sanitize(f"{target['class_label']}_{uid[:8]}")
+            _try_frame(f"/World/Memory/{label}")
         if shots_dir:
             _capture(shots_dir / f"seq_{seq:04d}_{et}.png")
         if args.auto > 0:
