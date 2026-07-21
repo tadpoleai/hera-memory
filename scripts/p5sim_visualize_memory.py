@@ -512,6 +512,21 @@ def main():
         ok = ctx.open_stage(str(Path(args.scene).resolve()))
         if not ok:
             sys.exit(f"打开失败: {args.scene}")
+        # open_stage() 提交加载请求就返回, 不等实际内容加载完 -- 实测直接
+        # 接着操作 stage 会拿到空场景(窗口纯黑, outliner 一个节点都没有)。
+        # 用 is_stage_loading() 轮询, 没有这个方法就退化成固定次数 app.update()
+        # 兜底, 外加一个"根 prim 是否已出现"的直接检查双重保险。
+        print("[open_as_root] 等待场景加载...")
+        for i in range(600):
+            app.update()
+            still_loading = getattr(ctx, "is_stage_loading", lambda: False)()
+            root_ready = ctx.get_stage() is not None and \
+                ctx.get_stage().GetPrimAtPath("/root").IsValid()
+            if not still_loading and root_ready:
+                print(f"[open_as_root] 加载完成, 用了 {i+1} 次 app.update()")
+                break
+        else:
+            print("[open_as_root][warn] 等了 600 次 app.update() 仍未确认加载完成, 继续往下走")
         stage = ctx.get_stage()
         UsdGeom.Xform.Define(stage, "/World")  # 我们自己画的东西的命名空间
     else:
