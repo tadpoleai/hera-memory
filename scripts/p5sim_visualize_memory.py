@@ -56,6 +56,21 @@ parser.add_argument("--exclude-labels", default=None,
 parser.add_argument("--stations", default=None)
 parser.add_argument("--yup", action="store_true",
                     help="场景源数据是 Y-up (如 4dkankan/realsee 的 OBJ)")
+parser.add_argument("--open-as-root", action="store_true",
+                    help="直接把 --scene 的 USD 文件当 stage 根打开"
+                         "(Usd.Context.open_stage),而不是新建一个空白 stage"
+                         "再把它 reference 进 /World/Scene。默认(reference)"
+                         "模式下场景自带的 DomeLight/RenderSettings 等 stage"
+                         "级设置不会生效,只有场景本身是'烘焙自包含'导出、"
+                         "自己不依赖那些 stage 级设置时才没关系(scene_04.usd"
+                         "属于这种,实测正常)。像 KitchenRoom.usd 这种没拍平的"
+                         "原始工程结构, reference 模式下会退化成 Isaac Sim 自带"
+                         "的默认兜底天空盒/光照, 材质在错误光照下显得又黑又反光"
+                         "(实测现象)——这个开关让它直接当 stage 根打开, 场景"
+                         "自己的灯光/环境设置才会正常生效。代价: --yup 的整体"
+                         "旋转技巧在这个模式下不适用(没有可旋转的 /World/Scene"
+                         "包装节点了), 目前只在两个真实场景都是 Z-up 的情况下"
+                         "验证过, 用在 Y-up 场景上需要另外处理。")
 parser.add_argument("--auto", type=float, default=0.0,
                     help="replay 自动播放, 每事件停留秒数; 0=回车步进(默认)")
 parser.add_argument("--shots", default=None,
@@ -490,11 +505,21 @@ def run_occlusion(stage, objs, stations_path):
 
 def main():
     ctx = omni.usd.get_context()
-    ctx.new_stage()
-    stage = ctx.get_stage()
-    UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
-    UsdGeom.SetStageMetersPerUnit(stage, 1.0)
-    UsdGeom.Xform.Define(stage, "/World")
+
+    if args.open_as_root:
+        if args.yup:
+            sys.exit("--open-as-root 和 --yup 目前不兼容, 见 --open-as-root 的帮助说明")
+        ok = ctx.open_stage(str(Path(args.scene).resolve()))
+        if not ok:
+            sys.exit(f"打开失败: {args.scene}")
+        stage = ctx.get_stage()
+        UsdGeom.Xform.Define(stage, "/World")  # 我们自己画的东西的命名空间
+    else:
+        ctx.new_stage()
+        stage = ctx.get_stage()
+        UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+        UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+        UsdGeom.Xform.Define(stage, "/World")
 
     objs, events = load_memory(args.db)
     gt_sizes = load_gt_sizes(args.gt)
@@ -514,7 +539,8 @@ def main():
         events = [e for e in events if e["entity_uuid"] in {o["uuid"] for o in objs}]
         print(f"[exclude] 排除 {excl}: {before} -> {len(objs)} 条实体")
 
-    load_scene(stage, args.scene, args.yup)
+    if not args.open_as_root:
+        load_scene(stage, args.scene, args.yup)
 
     if args.mode == "snapshot":
         draw_entities(stage, objs, gt_sizes)
